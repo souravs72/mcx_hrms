@@ -8,6 +8,8 @@ from __future__ import annotations
 import frappe
 
 from mcx_hrms.constants import COMPANY_NAME, DEMO_SITE
+from mcx_hrms.setup.demo import is_demo_site
+from mcx_hrms.setup.hr_lifecycle import has_fy_2026_income_tax_slab
 
 
 def run_production_gates(company: str | None = None) -> dict:
@@ -15,7 +17,7 @@ def run_production_gates(company: str | None = None) -> dict:
 	company = company or COMPANY_NAME
 	checks: list[dict] = []
 
-	checks.append(_gate("Site is demo site", frappe.local.site == DEMO_SITE))
+	checks.append(_gate("Site is demo site", is_demo_site()))
 	checks.append(_gate("HRMS installed", "hrms" in frappe.get_installed_apps()))
 	checks.append(_gate("India Payroll installed", "india_payroll" in frappe.get_installed_apps()))
 	checks.append(_gate("LMS installed", "lms" in frappe.get_installed_apps()))
@@ -42,7 +44,7 @@ def run_production_gates(company: str | None = None) -> dict:
 	checks.append(
 		_gate(
 			"FY 2026-27 tax slab present (validate before production)",
-			frappe.db.exists("Income Tax Slab", "New Tax Regime: 2026-2027"),
+			has_fy_2026_income_tax_slab(),
 			blocker="Confirm notified FY 2026-27 slabs with Finance before live payroll.",
 		)
 	)
