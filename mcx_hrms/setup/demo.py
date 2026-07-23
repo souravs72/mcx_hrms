@@ -16,16 +16,22 @@ from mcx_hrms.constants import (
 	COMPANY_NAME,
 	DEMO_EMPLOYEES,
 	DEMO_SITE,
+	DEMO_USER_PASSWORD,
 	DEPARTMENTS,
 	DESIGNATIONS,
 	EMPLOYEE_GRADES,
 	EXPENSE_APPROVAL_ROLES,
 	EXPENSE_CLAIM_TYPES,
 	HOLIDAY_LIST_NAME,
+	JOB_APPLICANT_EMAIL,
 	JOB_APPLICANT_NAME,
 	JOB_OPENING_TITLE,
 	LEAVE_POLICY_TITLE,
 	LEAVE_TYPES,
+	LEGACY_JOB_APPLICANT_NAME,
+	LEGACY_JOB_OPENING_TITLE,
+	LEGACY_LMS_BATCH_TITLE,
+	LEGACY_TRAINING_EVENT_NAME,
 	LMS_BATCH_TITLE,
 	LMS_COURSE_TITLE,
 	SALARY_COMPONENTS,
@@ -153,12 +159,9 @@ def ensure_employee_grades():
 
 def ensure_holiday_list(company: str):
 	year = getdate(today()).year
+	holidays = _india_holidays_for_year(year)
+
 	if not frappe.db.exists("Holiday List", HOLIDAY_LIST_NAME):
-		holidays = [
-			{"holiday_date": f"{year}-01-26", "description": "Republic Day"},
-			{"holiday_date": f"{year}-08-15", "description": "Independence Day"},
-			{"holiday_date": f"{year}-10-02", "description": "Gandhi Jayanti"},
-		]
 		doc = frappe.get_doc(
 			{
 				"doctype": "Holiday List",
@@ -170,6 +173,17 @@ def ensure_holiday_list(company: str):
 			}
 		)
 		doc.insert(ignore_permissions=True)
+	else:
+		# Backfill missing public holidays on existing list
+		doc = frappe.get_doc("Holiday List", HOLIDAY_LIST_NAME)
+		existing = {str(getdate(h.holiday_date)) for h in doc.holidays}
+		added = False
+		for row in holidays:
+			if row["holiday_date"] not in existing:
+				doc.append("holidays", row)
+				added = True
+		if added:
+			doc.save(ignore_permissions=True)
 
 	if frappe.db.exists("Company", company):
 		frappe.db.set_value("Company", company, "default_holiday_list", HOLIDAY_LIST_NAME)
@@ -178,6 +192,24 @@ def ensure_holiday_list(company: str):
 	from mcx_hrms.setup.hr_lifecycle import ensure_holiday_list_assignment
 
 	ensure_holiday_list_assignment(company)
+
+
+def _india_holidays_for_year(year: int) -> list[dict]:
+	"""National + common Maharashtra/TN market holidays for a polished calendar."""
+	return [
+		{"holiday_date": f"{year}-01-26", "description": "Republic Day"},
+		{"holiday_date": f"{year}-03-14", "description": "Holi"},
+		{"holiday_date": f"{year}-04-03", "description": "Good Friday"},
+		{"holiday_date": f"{year}-04-14", "description": "Dr. Ambedkar Jayanti"},
+		{"holiday_date": f"{year}-05-01", "description": "Maharashtra Day"},
+		{"holiday_date": f"{year}-08-15", "description": "Independence Day"},
+		{"holiday_date": f"{year}-08-27", "description": "Ganesh Chaturthi"},
+		{"holiday_date": f"{year}-10-02", "description": "Gandhi Jayanti"},
+		{"holiday_date": f"{year}-10-20", "description": "Dussehra"},
+		{"holiday_date": f"{year}-11-08", "description": "Diwali"},
+		{"holiday_date": f"{year}-11-09", "description": "Diwali (Balipratipada)"},
+		{"holiday_date": f"{year}-12-25", "description": "Christmas"},
+	]
 
 
 def ensure_leave_types():
@@ -308,7 +340,7 @@ def ensure_user(email: str, first_name: str, last_name: str, roles: list[str] | 
 				"user_type": "System User",
 			}
 		)
-		user.new_password = "demo@123"
+		user.new_password = DEMO_USER_PASSWORD
 		user.insert(ignore_permissions=True)
 
 	for role in roles or ["Employee", "Leave Approver"]:
@@ -344,34 +376,12 @@ def ensure_demo_employees(company: str) -> list[str]:
 			# employees onto the MCX company instead of mixing companies in SSA.
 			if existing.company != company:
 				_rehome_demo_employee(existing.name, company, dept, spec, hr_manager_email)
+			else:
+				_polish_employee_profile(existing.name, company, dept, spec, hr_manager_email)
 			employee_ids.append(existing.name)
 			continue
 
-		doc = frappe.get_doc(
-			{
-				"doctype": "Employee",
-				"first_name": spec["first_name"],
-				"last_name": spec["last_name"],
-				"employee_name": f"{spec['first_name']} {spec['last_name']}",
-				"company": company,
-				"user_id": spec["email"],
-				"company_email": spec["email"],
-				"prefered_contact_email": "Company Email",
-				"prefered_email": spec["email"],
-				"date_of_birth": "1990-01-15",
-				"date_of_joining": "2020-04-01",
-				"department": dept,
-				"designation": spec["designation"],
-				"branch": spec["branch"],
-				"grade": spec["grade"],
-				"gender": spec["gender"],
-				"status": "Active",
-				"holiday_list": HOLIDAY_LIST_NAME,
-				"leave_approver": hr_manager_email,
-				"expense_approver": hr_manager_email,
-				"salary_mode": "Bank",
-			}
-		)
+		doc = frappe.get_doc(_employee_payload(company, dept, spec, hr_manager_email))
 		# Hierarchy: non-HR employees report to Priya (HR Manager)
 		if spec["email"] != hr_manager_email:
 			hr_emp = frappe.db.get_value("Employee", {"user_id": hr_manager_email})
@@ -383,6 +393,57 @@ def ensure_demo_employees(company: str) -> list[str]:
 	return employee_ids
 
 
+def _employee_payload(company: str, department: str | None, spec: dict, hr_manager_email: str) -> dict:
+	return {
+		"doctype": "Employee",
+		"first_name": spec["first_name"],
+		"last_name": spec["last_name"],
+		"employee_name": f"{spec['first_name']} {spec['last_name']}",
+		"company": company,
+		"user_id": spec["email"],
+		"company_email": spec["email"],
+		"prefered_contact_email": "Company Email",
+		"prefered_email": spec["email"],
+		"date_of_birth": spec.get("date_of_birth") or "1990-01-15",
+		"date_of_joining": spec.get("date_of_joining") or "2020-04-01",
+		"cell_number": spec.get("cell_number"),
+		"permanent_address": spec.get("permanent_address"),
+		"current_address": spec.get("current_address"),
+		"department": department,
+		"designation": spec["designation"],
+		"branch": spec["branch"],
+		"grade": spec["grade"],
+		"gender": spec["gender"],
+		"status": "Active",
+		"holiday_list": HOLIDAY_LIST_NAME,
+		"leave_approver": hr_manager_email,
+		"expense_approver": hr_manager_email,
+		"salary_mode": "Bank",
+	}
+
+
+def _polish_employee_profile(
+	employee: str,
+	company: str,
+	department: str | None,
+	spec: dict,
+	hr_manager_email: str,
+) -> None:
+	"""Refresh profile fields so older thin seeds look production-ready."""
+	doc = frappe.get_doc("Employee", employee)
+	payload = _employee_payload(company, department, spec, hr_manager_email)
+	for key, val in payload.items():
+		if key in {"doctype", "user_id", "company"} or val in (None, ""):
+			continue
+		if hasattr(doc, key):
+			doc.set(key, val)
+	if spec["email"] != hr_manager_email:
+		hr_emp = frappe.db.get_value("Employee", {"user_id": hr_manager_email, "company": company})
+		if hr_emp and hr_emp != employee:
+			doc.reports_to = hr_emp
+	doc.save(ignore_permissions=True)
+
+
 def _rehome_demo_employee(
 	employee: str,
 	company: str,
@@ -391,29 +452,9 @@ def _rehome_demo_employee(
 	hr_manager_email: str,
 ) -> None:
 	"""Move an existing @mcx.demo employee onto the demo company and refresh profile."""
+	_polish_employee_profile(employee, company, department, spec, hr_manager_email)
 	doc = frappe.get_doc("Employee", employee)
 	doc.company = company
-	doc.first_name = spec["first_name"]
-	doc.last_name = spec["last_name"]
-	doc.employee_name = f"{spec['first_name']} {spec['last_name']}"
-	doc.department = department
-	doc.designation = spec["designation"]
-	doc.branch = spec["branch"]
-	doc.grade = spec["grade"]
-	doc.gender = spec["gender"]
-	doc.status = "Active"
-	doc.holiday_list = HOLIDAY_LIST_NAME
-	doc.leave_approver = hr_manager_email
-	doc.expense_approver = hr_manager_email
-	doc.salary_mode = "Bank"
-	if spec["email"] != hr_manager_email:
-		hr_emp = frappe.db.get_value("Employee", {"user_id": hr_manager_email, "company": company})
-		if not hr_emp:
-			hr_emp = frappe.db.get_value("Employee", {"user_id": hr_manager_email})
-		if hr_emp and hr_emp != employee:
-			doc.reports_to = hr_emp
-	else:
-		doc.reports_to = None
 	doc.save(ignore_permissions=True)
 
 
@@ -421,7 +462,30 @@ def ensure_job_opening_and_applicant(company: str):
 	if not frappe.db.exists("Designation", "Trading Executive"):
 		return
 
+	# Rename legacy demo-titled opening if present
+	legacy_opening = frappe.db.get_value("Job Opening", {"job_title": LEGACY_JOB_OPENING_TITLE})
+	if legacy_opening and not frappe.db.exists("Job Opening", {"job_title": JOB_OPENING_TITLE}):
+		frappe.db.set_value("Job Opening", legacy_opening, "job_title", JOB_OPENING_TITLE)
+
 	opening = frappe.db.get_value("Job Opening", {"job_title": JOB_OPENING_TITLE})
+	jd = (
+		"<p><b>Role overview</b></p>"
+		"<p>Execute and monitor trades on the MCX commodity desk, support member queries, "
+		"and ensure order-to-settlement hygiene in line with exchange rules.</p>"
+		"<p><b>Key responsibilities</b></p>"
+		"<ul>"
+		"<li>Order entry, modifications and cancellations on the trading platform</li>"
+		"<li>Intraday monitoring of positions, margins and market alerts</li>"
+		"<li>Coordination with Clearing &amp; Settlement and Compliance on exceptions</li>"
+		"<li>Member onboarding support for trading workflows</li>"
+		"</ul>"
+		"<p><b>Requirements</b></p>"
+		"<ul>"
+		"<li>2–5 years in exchange / brokerage trading operations</li>"
+		"<li>Working knowledge of commodity derivatives and risk limits</li>"
+		"<li>Strong communication skills for member-facing work</li>"
+		"</ul>"
+	)
 	if not opening:
 		opening = frappe.get_doc(
 			{
@@ -432,14 +496,20 @@ def ensure_job_opening_and_applicant(company: str):
 				"department": frappe.db.get_value(
 					"Department", {"department_name": "Trading Operations", "company": company}
 				),
-				"description": "Demo job opening for MCX trading operations role.",
+				"description": jd,
 				"status": "Open",
 				"publish": 1,
 			}
 		).insert(ignore_permissions=True).name
+	else:
+		frappe.db.set_value("Job Opening", opening, "description", jd)
+
+	legacy_applicant = frappe.db.get_value("Job Applicant", {"applicant_name": LEGACY_JOB_APPLICANT_NAME})
+	if legacy_applicant and not frappe.db.exists("Job Applicant", {"applicant_name": JOB_APPLICANT_NAME}):
+		frappe.db.set_value("Job Applicant", legacy_applicant, "applicant_name", JOB_APPLICANT_NAME)
+		frappe.db.set_value("Job Applicant", legacy_applicant, "email_id", JOB_APPLICANT_EMAIL)
 
 	if frappe.db.exists("Job Applicant", {"applicant_name": JOB_APPLICANT_NAME}):
-		# Ensure native Job Opening link (job_title) is set
 		applicant = frappe.db.get_value("Job Applicant", {"applicant_name": JOB_APPLICANT_NAME})
 		if opening and not frappe.db.get_value("Job Applicant", applicant, "job_title"):
 			frappe.db.set_value("Job Applicant", applicant, "job_title", opening)
@@ -449,11 +519,15 @@ def ensure_job_opening_and_applicant(company: str):
 		{
 			"doctype": "Job Applicant",
 			"applicant_name": JOB_APPLICANT_NAME,
-			"email_id": "arjun.desai@example.com",
-			"phone_number": "+91-9876543210",
+			"email_id": JOB_APPLICANT_EMAIL,
+			"phone_number": "+91-9876501234",
 			"designation": "Trading Executive",
 			"job_title": opening,
 			"status": "Open",
+			"cover_letter": (
+				"I bring four years of commodity desk experience across futures order management "
+				"and member support, and am keen to contribute to MCX Trading Operations."
+			),
 		}
 	).insert(ignore_permissions=True)
 
@@ -465,7 +539,7 @@ def ensure_training_and_lms(company: str, employees: list[str]):
 				"doctype": "Training Program",
 				"training_program": TRAINING_PROGRAM_NAME,
 				"company": company,
-				"description": "Mandatory compliance training for MCX staff.",
+				"description": "Mandatory compliance and regulatory readiness programme for MCX staff.",
 				"status": "Scheduled",
 			}
 		)
@@ -476,6 +550,12 @@ def ensure_training_and_lms(company: str, employees: list[str]):
 	if "lms" in frappe.get_installed_apps():
 		course_name = ensure_lms_course()
 		batch_name = ensure_lms_batch(course_name)
+
+	# Rename legacy training event title if present
+	if frappe.db.exists("Training Event", LEGACY_TRAINING_EVENT_NAME) and not frappe.db.exists(
+		"Training Event", TRAINING_EVENT_NAME
+	):
+		frappe.rename_doc("Training Event", LEGACY_TRAINING_EVENT_NAME, TRAINING_EVENT_NAME, force=True)
 
 	if frappe.db.exists("Training Event", TRAINING_EVENT_NAME):
 		return
@@ -494,17 +574,22 @@ def ensure_training_and_lms(company: str, employees: list[str]):
 			"trainer_name": "MCX Compliance Team",
 			"trainer_email": "training@mcx.demo",
 			"course": LMS_COURSE_TITLE,
-			"location": "Mumbai HQ - Conference Room A",
+			"location": "Mumbai HQ — Conference Room A",
 			"start_time": start,
 			"end_time": end,
-			"introduction": "Quarterly compliance workshop linked to LMS course content.",
-			"employees": [{"employee": emp} for emp in employees[:3]],
+			"introduction": (
+				"Quarterly SEBI / exchange compliance refresher covering reporting obligations, "
+				"KYC hygiene and desk escalation protocols."
+			),
 		}
 	)
-	if course_name:
+	# Optional LMS links when fields exist
+	if course_name and hasattr(event, "lms_course"):
 		event.lms_course = course_name
-	if batch_name:
+	if batch_name and hasattr(event, "lms_batch"):
 		event.lms_batch = batch_name
+	for emp in employees[:3]:
+		event.append("employees", {"employee": emp})
 	event.insert(ignore_permissions=True)
 
 
@@ -523,8 +608,11 @@ def ensure_lms_course() -> str:
 		{
 			"doctype": "LMS Course",
 			"title": LMS_COURSE_TITLE,
-			"short_introduction": "Core compliance concepts for MCX operations.",
-			"description": "<p>Covers regulatory framework, member obligations, and reporting standards.</p>",
+			"short_introduction": "Core compliance concepts for MCX operations staff.",
+			"description": (
+				"<p>Covers the regulatory framework, member obligations, periodic reporting "
+				"and KYC hygiene expected across Trading, Clearing and Compliance desks.</p>"
+			),
 			"published": 1,
 			"disable_self_learning": 0,
 			"instructors": [{"instructor": instructor}],
@@ -535,6 +623,10 @@ def ensure_lms_course() -> str:
 
 
 def ensure_lms_batch(course: str) -> str:
+	legacy = frappe.db.get_value("LMS Batch", {"title": LEGACY_LMS_BATCH_TITLE})
+	if legacy and not frappe.db.exists("LMS Batch", {"title": LMS_BATCH_TITLE}):
+		frappe.db.set_value("LMS Batch", legacy, "title", LMS_BATCH_TITLE)
+
 	existing = frappe.db.get_value("LMS Batch", {"title": LMS_BATCH_TITLE})
 	if existing:
 		return existing
@@ -551,8 +643,11 @@ def ensure_lms_batch(course: str) -> str:
 			"start_time": "10:00:00",
 			"end_time": "12:00:00",
 			"timezone": "Asia/Kolkata",
-			"description": "MCX compliance training batch for Q1 2026.",
-			"batch_details": "<p>MCX compliance training batch for Q1 2026.</p>",
+			"description": "Instructor-led compliance cohort for FY 2026-27 onboarding and refreshers.",
+			"batch_details": (
+				"<p>Cohort covers SEBI / exchange reporting, KYC refresh and desk escalation drills. "
+				"Attendance is tracked against the linked Training Event.</p>"
+			),
 			"allow_self_enrollment": 0,
 			"medium": "Online",
 			"courses": [{"course": course}],

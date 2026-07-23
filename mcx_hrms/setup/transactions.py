@@ -20,7 +20,9 @@ from mcx_hrms.constants import (
 	HOLIDAY_LIST_NAME,
 	JOB_APPLICANT_NAME,
 	JOB_OPENING_TITLE,
+	LEGACY_DEMO_TAG,
 	SALARY_STRUCTURE_NAME,
+	SEED_LABELS,
 	SHIFT_TYPE_NAME,
 )
 from mcx_hrms.setup.hr_lifecycle import (
@@ -29,12 +31,13 @@ from mcx_hrms.setup.hr_lifecycle import (
 	ensure_holiday_list_assignment,
 )
 
-DEMO_TAG = "MCX Demo"
+DEMO_TAG = LEGACY_DEMO_TAG  # kept for legacy lookup during polish
 BANK_NAME = "HDFC Bank"
 COMPANY_BANK_GL = "HDFC Current Account - MCX"
 EXPENSE_PAYABLE_GL = "Expense Claims Payable - MCX"
-INTERVIEW_TYPE_NAME = "MCX Technical Round"
+INTERVIEW_TYPE_NAME = "Technical & Domain — Trading Desk"
 SKILL_NAME = "Commodity Trading"
+LEGACY_INTERVIEW_TYPE = "MCX Technical Round"
 
 
 def seed_demo_transactions(company: str | None = None) -> dict:
@@ -63,6 +66,7 @@ def seed_demo_transactions(company: str | None = None) -> dict:
 
 	_run("Company accounts", lambda: ensure_company_accounts(company))
 	_run("Workflows sync", lambda: _sync_workflows())
+	_run("Polish legacy labels", lambda: polish_legacy_seed_labels(company, employees))
 	_run("HR lifecycle masters", lambda: _ensure_lifecycle(company, list(employees.values())))
 	_run("Holiday list assignment", lambda: _ensure_hla(company))
 	_run("Submit salary structure assignments", lambda: _submit_ssas(company))
@@ -171,11 +175,17 @@ def _repair_expense_claim_status() -> str | None:
 
 
 def _link_orphan_checkins() -> str | None:
-	"""Link demo checkins to same-day Attendance (native attendance field on Employee Checkin)."""
+	"""Link seed checkins to same-day Attendance (native attendance field on Employee Checkin)."""
 	linked = 0
+	device_ids = {
+		DEMO_TAG,
+		SEED_LABELS["device_mumbai"],
+		SEED_LABELS["device_delhi"],
+		SEED_LABELS["device_chennai"],
+	}
 	for ck in frappe.get_all(
 		"Employee Checkin",
-		filters={"device_id": DEMO_TAG, "attendance": ["in", ["", None]]},
+		filters={"device_id": ["in", list(device_ids)], "attendance": ["in", ["", None]]},
 		fields=["name", "employee", "time"],
 	):
 		day = getdate(ck.time)
@@ -188,6 +198,55 @@ def _link_orphan_checkins() -> str | None:
 		frappe.db.set_value("Employee Checkin", ck.name, "attendance", att, update_modified=False)
 		linked += 1
 	return f"linked {linked}" if linked else None
+
+
+def polish_legacy_seed_labels(company: str, employees: dict[str, str]) -> str | None:
+	"""Rewrite older 'MCX Demo …' labels to production-looking copy."""
+	updated = 0
+
+	def _rename(doctype: str, field: str, old: str, new: str, extra: dict | None = None):
+		nonlocal updated
+		filters = {field: old}
+		if extra:
+			filters.update(extra)
+		for name in frappe.get_all(doctype, filters=filters, pluck="name"):
+			frappe.db.set_value(doctype, name, field, new, update_modified=False)
+			updated += 1
+
+	rahul, anita, vikram, meera = (
+		employees.get("Rahul"),
+		employees.get("Anita"),
+		employees.get("Vikram"),
+		employees.get("Meera"),
+	)
+	if rahul:
+		_rename("Leave Application", "description", f"{DEMO_TAG} pending leave", SEED_LABELS["leave_pending"], {"employee": rahul})
+		_rename("Expense Claim", "remark", f"{DEMO_TAG} approved expense", SEED_LABELS["expense_approved"], {"employee": rahul})
+	if anita:
+		_rename("Leave Application", "description", f"{DEMO_TAG} approved leave", SEED_LABELS["leave_approved"], {"employee": anita})
+	if vikram:
+		_rename("Expense Claim", "remark", f"{DEMO_TAG} pending expense L1", SEED_LABELS["expense_pending"], {"employee": vikram})
+		_rename("Employee Advance", "purpose", f"{DEMO_TAG} travel imprest", SEED_LABELS["advance"], {"employee": vikram})
+	if meera:
+		_rename(
+			"Attendance Request",
+			"explanation",
+			f"{DEMO_TAG} WFH regularization",
+			SEED_LABELS["attendance_wfh"],
+			{"employee": meera},
+		)
+
+	for name in frappe.get_all("Employee Checkin", filters={"device_id": DEMO_TAG}, pluck="name"):
+		frappe.db.set_value("Employee Checkin", name, "device_id", SEED_LABELS["device_mumbai"], update_modified=False)
+		updated += 1
+
+	if frappe.db.exists("Interview Type", LEGACY_INTERVIEW_TYPE) and not frappe.db.exists(
+		"Interview Type", INTERVIEW_TYPE_NAME
+	):
+		frappe.rename_doc("Interview Type", LEGACY_INTERVIEW_TYPE, INTERVIEW_TYPE_NAME, force=True)
+		updated += 1
+
+	return f"updated {updated}" if updated else None
 
 
 def _submit_ssas(company: str) -> str | None:
@@ -367,10 +426,12 @@ def ensure_employee_bank_details(employees: dict[str, str]) -> str | None:
 	if not frappe.db.exists("Bank", BANK_NAME):
 		return None
 
+	spec_by_first = {s["first_name"]: s for s in DEMO_EMPLOYEES}
 	created = []
-	for idx, (first_name, emp) in enumerate(employees.items(), start=1):
+	for first_name, emp in employees.items():
+		spec = spec_by_first.get(first_name) or {}
 		doc = frappe.get_doc("Employee", emp)
-		ac_no = f"50100{idx:06d}"
+		ac_no = spec.get("bank_ac_no") or f"50100{abs(hash(emp)) % 1000000:06d}"
 		changed = False
 		if doc.salary_mode != "Bank":
 			doc.salary_mode = "Bank"
@@ -378,8 +439,11 @@ def ensure_employee_bank_details(employees: dict[str, str]) -> str | None:
 		if doc.bank_name != BANK_NAME:
 			doc.bank_name = BANK_NAME
 			changed = True
-		if not doc.bank_ac_no:
+		if doc.bank_ac_no != ac_no:
 			doc.bank_ac_no = ac_no
+			changed = True
+		if spec.get("ifsc") and hasattr(doc, "ifsc_code") and doc.ifsc_code != spec["ifsc"]:
+			doc.ifsc_code = spec["ifsc"]
 			changed = True
 		if changed:
 			doc.save(ignore_permissions=True)
@@ -393,7 +457,7 @@ def ensure_employee_bank_details(employees: dict[str, str]) -> str | None:
 		frappe.get_doc(
 			{
 				"doctype": "Bank Account",
-				"account_name": f"{doc.employee_name} Salary",
+				"account_name": f"{doc.employee_name} — Salary",
 				"bank": BANK_NAME,
 				"party_type": "Employee",
 				"party": emp,
@@ -416,7 +480,7 @@ def ensure_employee_bank_details(employees: dict[str, str]) -> str | None:
 				"is_company_account": 1,
 				"company": COMPANY_NAME,
 				"account": COMPANY_BANK_GL,
-				"bank_account_no": "000123456789",
+				"bank_account_no": "502000112233",
 				"is_default": 1,
 			}
 		).insert(ignore_permissions=True)
@@ -440,8 +504,11 @@ def ensure_leave_applications(company: str, employees: dict[str, str]) -> str | 
 	created = []
 	approver = _hr_user()
 
-	# Pending — for live MSS approval in demo
+	# Pending — for live MSS approval
 	if not _already(
+		"Leave Application",
+		{"employee": rahul, "description": SEED_LABELS["leave_pending"]},
+	) and not _already(
 		"Leave Application",
 		{"employee": rahul, "description": f"{DEMO_TAG} pending leave"},
 	):
@@ -456,7 +523,7 @@ def ensure_leave_applications(company: str, employees: dict[str, str]) -> str | 
 				"company": company,
 				"status": "Open",
 				"leave_approver": approver,
-				"description": f"{DEMO_TAG} pending leave",
+				"description": SEED_LABELS["leave_pending"],
 			}
 		)
 		la.insert(ignore_permissions=True)
@@ -465,6 +532,9 @@ def ensure_leave_applications(company: str, employees: dict[str, str]) -> str | 
 
 	# Approved — historical
 	if anita and not _already(
+		"Leave Application",
+		{"employee": anita, "description": SEED_LABELS["leave_approved"]},
+	) and not _already(
 		"Leave Application",
 		{"employee": anita, "description": f"{DEMO_TAG} approved leave"},
 	):
@@ -479,7 +549,7 @@ def ensure_leave_applications(company: str, employees: dict[str, str]) -> str | 
 				"company": company,
 				"status": "Open",
 				"leave_approver": approver,
-				"description": f"{DEMO_TAG} approved leave",
+				"description": SEED_LABELS["leave_approved"],
 			}
 		)
 		la.insert(ignore_permissions=True)
@@ -587,14 +657,16 @@ def ensure_expense_claims(company: str, employees: dict[str, str]) -> str | None
 			apply_workflow(claim, "Submit for Approval")
 		return claim.name
 
-	# Live demo — stop at Pending L1
-	name = _make_claim(vikram, 2500, f"{DEMO_TAG} pending expense L1", True)
+	# Live approval queue — stop at Pending L1
+	name = _make_claim(vikram, 4850, SEED_LABELS["expense_pending"], True)
 	if name:
 		created.append(name)
 
 	# Fully approved history — workflow updates approval_status on final Approve
-	if rahul and not _already("Expense Claim", {"employee": rahul, "remark": f"{DEMO_TAG} approved expense"}):
-		name = _make_claim(rahul, 1800, f"{DEMO_TAG} approved expense", True)
+	if rahul and not _already(
+		"Expense Claim", {"employee": rahul, "remark": SEED_LABELS["expense_approved"]}
+	) and not _already("Expense Claim", {"employee": rahul, "remark": f"{DEMO_TAG} approved expense"}):
+		name = _make_claim(rahul, 1650, SEED_LABELS["expense_approved"], True)
 		if name:
 			claim = frappe.get_doc("Expense Claim", name)
 			prev = _as_user(approver)
@@ -613,8 +685,10 @@ def ensure_employee_advance(company: str, employees: dict[str, str]) -> str | No
 	emp = employees.get("Vikram")
 	if not emp:
 		return None
-	purpose = f"{DEMO_TAG} travel imprest"
-	if _already("Employee Advance", {"employee": emp, "purpose": purpose}):
+	purpose = SEED_LABELS["advance"]
+	if _already("Employee Advance", {"employee": emp, "purpose": purpose}) or _already(
+		"Employee Advance", {"employee": emp, "purpose": f"{DEMO_TAG} travel imprest"}
+	):
 		return None
 
 	currency = frappe.db.get_value("Company", company, "default_currency") or "INR"
@@ -625,7 +699,7 @@ def ensure_employee_advance(company: str, employees: dict[str, str]) -> str | No
 			"employee": emp,
 			"company": company,
 			"purpose": purpose,
-			"advance_amount": 5000,
+			"advance_amount": 7500,
 			"posting_date": today(),
 			"currency": currency,
 			"exchange_rate": 1,
@@ -634,7 +708,7 @@ def ensure_employee_advance(company: str, employees: dict[str, str]) -> str | No
 		}
 	)
 	doc.insert(ignore_permissions=True)
-	# Keep as draft so demo can show submit + payment flow without forcing GL
+	# Keep as draft so walkthrough can show submit + payment without forcing GL
 	return doc.name
 
 
@@ -648,17 +722,25 @@ def ensure_attendance_and_checkins(company: str, employees: dict[str, str]) -> s
 	from hrms.hr.doctype.employee_checkin.employee_checkin import mark_attendance_and_link_log
 
 	created = []
-	targets = [employees.get(n) for n in ("Rahul", "Anita", "Vikram") if employees.get(n)]
+	targets = [
+		(employees.get("Rahul"), SEED_LABELS["device_mumbai"], 19.0760, 72.8777),
+		(employees.get("Anita"), SEED_LABELS["device_delhi"], 28.6139, 77.2090),
+		(employees.get("Vikram"), SEED_LABELS["device_mumbai"], 19.0760, 72.8777),
+	]
+	targets = [t for t in targets if t[0]]
 	if not targets:
 		return None
 
-	for days_ago in (3, 2, 1):
+	for days_ago in (5, 4, 3, 2, 1):
 		day = add_days(getdate(today()), -days_ago)
 		if day.weekday() >= 5:
 			continue
-		for emp in targets:
-			in_time = f"{day} 09:05:00"
-			out_time = f"{day} 18:10:00"
+		for emp, device_id, lat, lng in targets:
+			# Slight stagger so punches look human
+			in_minute = 2 + (hash(emp) % 12)
+			out_minute = 5 + (hash(emp + "out") % 20)
+			in_time = f"{day} 09:{in_minute:02d}:00"
+			out_time = f"{day} 18:{out_minute:02d}:00"
 
 			if frappe.db.exists("Attendance", {"employee": emp, "attendance_date": day, "docstatus": 1}):
 				continue
@@ -673,9 +755,9 @@ def ensure_attendance_and_checkins(company: str, employees: dict[str, str]) -> s
 							"employee": emp,
 							"time": in_time,
 							"log_type": "IN",
-							"device_id": DEMO_TAG,
-							"latitude": 19.0760,
-							"longitude": 72.8777,
+							"device_id": device_id,
+							"latitude": lat,
+							"longitude": lng,
 						}
 					).insert(ignore_permissions=True)
 				)
@@ -691,9 +773,9 @@ def ensure_attendance_and_checkins(company: str, employees: dict[str, str]) -> s
 							"employee": emp,
 							"time": out_time,
 							"log_type": "OUT",
-							"device_id": DEMO_TAG,
-							"latitude": 19.0760,
-							"longitude": 72.8777,
+							"device_id": device_id,
+							"latitude": lat,
+							"longitude": lng,
 						}
 					).insert(ignore_permissions=True)
 				)
@@ -714,7 +796,7 @@ def ensure_attendance_and_checkins(company: str, employees: dict[str, str]) -> s
 			if att:
 				created.append(getattr(att, "name", str(att)))
 
-	return f"{len(created)} days" if created else None
+	return f"{len(created)} punches" if created else None
 
 
 def ensure_attendance_request(company: str, employees: dict[str, str]) -> str | None:
@@ -741,11 +823,11 @@ def ensure_attendance_request(company: str, employees: dict[str, str]) -> str | 
 			"from_date": from_date,
 			"to_date": from_date,
 			"reason": "Work From Home",
-			"explanation": f"{DEMO_TAG} WFH regularization",
+			"explanation": SEED_LABELS["attendance_wfh"],
 		}
 	)
 	doc.insert(ignore_permissions=True)
-	# Leave draft for live submit in demo (submit creates Attendance)
+	# Leave draft for live submit (submit creates Attendance)
 	return doc.name
 
 
@@ -894,7 +976,11 @@ def ensure_appraisal(company: str, employees: dict[str, str]) -> str | None:
 
 
 def ensure_interview_and_offer(company: str, employees: dict[str, str]) -> str | None:
+	from mcx_hrms.constants import LEGACY_JOB_APPLICANT_NAME
+
 	applicant = frappe.db.get_value("Job Applicant", {"applicant_name": JOB_APPLICANT_NAME})
+	if not applicant:
+		applicant = frappe.db.get_value("Job Applicant", {"applicant_name": LEGACY_JOB_APPLICANT_NAME})
 	if not applicant:
 		return None
 
@@ -909,8 +995,8 @@ def ensure_interview_and_offer(company: str, employees: dict[str, str]) -> str |
 			{
 				"doctype": "Interview Type",
 				"interview_type_name": INTERVIEW_TYPE_NAME,
-				"description": f"{DEMO_TAG} technical interview",
-				"expected_average_rating": 3,
+				"description": SEED_LABELS["interview_type"],
+				"expected_average_rating": 3.5,
 				"expected_skill_set": [{"skill": SKILL_NAME}],
 			}
 		)
@@ -993,21 +1079,21 @@ def ensure_employee_separation(company: str, employees: dict[str, str]) -> str |
 			"activities": [
 				{
 					"activity_name": "Return company assets",
-					"description": f"{DEMO_TAG} Collect laptop, ID card and access tokens.",
+					"description": SEED_LABELS["separation_assets"],
 				},
 				{
 					"activity_name": "Revoke system access",
-					"description": f"{DEMO_TAG} Disable ERP, LMS and email access.",
+					"description": SEED_LABELS["separation_access"],
 				},
 				{
 					"activity_name": "Full and Final settlement",
-					"description": f"{DEMO_TAG} Process F&F and gratuity where applicable.",
+					"description": SEED_LABELS["separation_fnf"],
 				},
 			],
 		}
 	)
 	doc.insert(ignore_permissions=True)
-	# Keep draft so demo can show submit → project/tasks creation
+	# Keep draft so walkthrough can show submit → project/tasks creation
 	return doc.name
 
 

@@ -118,21 +118,29 @@ def ensure_leave_period_and_allocations(company: str, employees: list[str]):
 					{"employee": employee, "from_date": from_date, "to_date": to_date, "docstatus": 1},
 				)
 				if not has_alloc:
-					frappe.get_doc("Leave Policy Assignment", existing.name).submit()
+					try:
+						frappe.get_doc("Leave Policy Assignment", existing.name).submit()
+					except Exception:
+						# OverlapError / already allocated — treat as seeded
+						frappe.clear_messages()
 			continue
 
-		lpa = frappe.get_doc(
-			{
-				"doctype": "Leave Policy Assignment",
-				"employee": employee,
-				"leave_policy": leave_policy,
-				"assignment_based_on": "Leave Period",
-				"leave_period": leave_period,
-				"effective_from": from_date,
-			}
-		)
-		lpa.insert(ignore_permissions=True)
-		lpa.submit()
+		try:
+			lpa = frappe.get_doc(
+				{
+					"doctype": "Leave Policy Assignment",
+					"employee": employee,
+					"leave_policy": leave_policy,
+					"assignment_based_on": "Leave Period",
+					"leave_period": leave_period,
+					"effective_from": from_date,
+				}
+			)
+			lpa.insert(ignore_permissions=True)
+			lpa.submit()
+		except Exception:
+			frappe.clear_messages()
+			continue
 
 
 def ensure_shift_assignments(employees: list[str]):
@@ -271,34 +279,57 @@ def ensure_income_tax_slab_2026_27():
 
 
 def ensure_pms_masters(company: str):
-	if not frappe.db.exists("KRA", "MCX Trading Operations KRA"):
-		frappe.get_doc(
-			{
-				"doctype": "KRA",
-				"title": "MCX Trading Operations KRA",
-				"description": "Order accuracy, settlement timeliness and compliance adherence.",
-			}
-		).insert(ignore_permissions=True)
+	kras = [
+		(
+			"Order & trade execution quality",
+			"Accuracy of order handling, turnaround on member requests, and exception escalation.",
+		),
+		(
+			"Settlement discipline",
+			"On-time pay-in/pay-out coordination and reduction of settlement breaks.",
+		),
+		(
+			"Regulatory & compliance adherence",
+			"Timely reporting, KYC hygiene, and zero critical compliance findings.",
+		),
+		(
+			"Collaboration & process improvement",
+			"Cross-desk coordination with Clearing, IT and Compliance; documented SOPs.",
+		),
+	]
+	for title, description in kras:
+		if not frappe.db.exists("KRA", title):
+			frappe.get_doc(
+				{"doctype": "KRA", "title": title, "description": description}
+			).insert(ignore_permissions=True)
 
 	if not frappe.db.exists("Appraisal Template", "MCX Annual Appraisal Template"):
 		template = frappe.get_doc(
 			{
 				"doctype": "Appraisal Template",
 				"template_title": "MCX Annual Appraisal Template",
-				"description": "Annual performance review for MCX employees.",
+				"description": "Annual performance review framework for MCX operations staff.",
 				"kra_evaluation_method": "Manual Rating",
 				"rate_goals_manually": 1,
 				"goals": [
-					{
-						"key_result_area": "MCX Trading Operations KRA",
-						"per_weightage": 100,
-					}
+					{"key_result_area": kras[0][0], "per_weightage": 30},
+					{"key_result_area": kras[1][0], "per_weightage": 25},
+					{"key_result_area": kras[2][0], "per_weightage": 25},
+					{"key_result_area": kras[3][0], "per_weightage": 20},
 				],
 			}
 		)
 		template.insert(ignore_permissions=True)
 
 	if frappe.db.exists("Appraisal Cycle", APPRAISAL_CYCLE_NAME):
+		# Soften older demo wording
+		frappe.db.set_value(
+			"Appraisal Cycle",
+			APPRAISAL_CYCLE_NAME,
+			"description",
+			"FY performance cycle for Trading, Clearing, IT and Compliance teams.",
+			update_modified=False,
+		)
 		return
 
 	cycle = frappe.get_doc(
@@ -308,7 +339,7 @@ def ensure_pms_masters(company: str):
 			"company": company,
 			"start_date": get_first_day(today()),
 			"end_date": get_last_day(add_months(today(), 11)),
-			"description": "Demo appraisal cycle for MCX HRMS rollout.",
+			"description": "FY performance cycle for Trading, Clearing, IT and Compliance teams.",
 			"kra_evaluation_method": "Manual Rating",
 			"status": "In Progress",
 		}

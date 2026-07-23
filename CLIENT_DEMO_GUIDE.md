@@ -98,7 +98,7 @@ Adjust to the client's priorities. Skip Helpdesk unless they ask.
 
 ### Part 2 — Leave ESS → MSS (~7 min)
 
-1. Switch to **Rahul**. Create or open the pending **Casual Leave** (`MCX Demo pending leave`).
+1. Switch to **Rahul**. Create or open the pending **Casual Leave** (`Family function — Casual Leave`).
 2. Show leave balance / allocation.
 3. Switch to **Priya**. Open the same Leave Application → workflow **Approve**.
 4. Show an already-approved leave (Anita) for history.
