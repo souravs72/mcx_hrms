@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import frappe
 
-from mcx_hrms.constants import COMPANY_NAME, DEMO_SITE
+from mcx_hrms.constants import COMPANY_NAME
 from mcx_hrms.setup.demo import is_demo_site
 from mcx_hrms.setup.hr_lifecycle import has_fy_2026_income_tax_slab
 
